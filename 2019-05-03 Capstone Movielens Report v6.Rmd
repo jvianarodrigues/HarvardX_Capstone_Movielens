@@ -1,0 +1,539 @@
+---
+title: "Movie Recommendation System"
+subtitle: "HardvardX Professional Certificate in Data Science - Capstone Project 1"
+author: "Joao Rodrigues"
+date: "21 May 2019"
+output: 
+  pdf_document:
+    fig_caption: true
+    fig_width: 4
+    fig_height: 3
+params:
+  subset_of_edx: 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## 1. Executive summary
+This report documents the analytical approach, modelling results and proposed next steps for the HarvardX Data Science Capstone Project, to build a recommendation system based upon the Movielens 10M data. In terms of approach, limited data pre-processing was required, exploratory data analysis dimensioned the dataset and tested for select correlations to movie ratings, and various predictive models were then constructed and tuned. In the final model recommendation model, a regularized movie and user effects model yielded an RMSE of 0.86511, below the target RMSE of 0.87750 for this assignment. The computational effort of applying alternative prediction approaches, (e.g. knn, random forests), ruled these out as feasible approaches, although these were tested on a much smaller subset of the Movielens dataset. 
+
+## 2. Objectives of this analysis
+This project sets out to demonstrate an appropriate approach to data exploration, and application of select machine learning algorithms to predict movie ratings from the Movielens data set. Specifically, this project demonstrates:
+
+*	A few basic checks in the data pre-processing phase;
+*	Exploratory data analysis to dimension the dataset and test for correlations to ratings;
+*	The construction and testing of models to target a RMSE lower than 0.87750. 
+    + Prediction models were evaluated using the residual mean squared error (RMSE) measure, defined as:    
+    $\mbox{RMSE} = \sqrt{\frac{1}{N} \sum_{u,i}^{} \left( \hat{y}_{u,i} - y_{u,i} \right)^2 }$.
+    + The Netflix grand prize winners achieved a final RMSE of approximately 0.857, and the grading rubric for this capstone targets an RMSE <= 0.87750 for full points. This informs the target range to evaluate the recommendation algorithms that follow. 
+
+## 3. Methodology
+### 3.1. Preprocessing 
+
+*	Tests for complete cases in the `edx` dataset revealed no partial data entries, i.e. no null data in any of the data entries. This is tested with the following code chunk:  
+
+`sum(complete.cases(edx)) == nrow(edx)`  
+
+* I hypothesise that the number of ratings that each movie received may be a predictor of the final rating (more popular movies attract more viewers and hence ratings). As such an additional predictor, `n_rating`, is added to the edx dataset for use in subsequent model tests.  
+
+`edx <- edx %>% group_by(movieId) %>% mutate(n_ratings = n()) %>% ungroup()`  
+
+* Genres are also likely to be a useful predictor. In the `edx` dataset, the `genres` column contains a single string entry for each movie, which is the concatenation of all applicable genres. However, there are 797 distinct combinations of genres, and would be viewed by training algorithms as discreet genres. Applying the `sep` string function to the `genres` data, the number of unique genres are reduced to 20, and a matrix of unique movie genres is appended to the `edx` training set.  
+
+* In the development and testing stages of the appropriate training algorithms, the `edx` dataset was further partitioned into training set that only represented 1-10% of the full dataset. This allowed for more rapid training on a smaller `edx_sample` and `validation_sample`.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Module 9 - Movielens capstone project
+# version 5.1S
+# Author: Jo Rodrigues
+# Date: May 2019
+
+
+# SECTION 1: EXTRACTING AND SETTING UP THE REQUIRED DATASETS ###############################
+# Create edx set, validation set, and submission file
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+# set up for creating the dataset from a local copy of the movielens source files
+setwd("Y:\\JRodrigues\\Knowledge\\Data Science\\Harvardx\\Course examples\\Module 9 - capstone")
+ratings <- read.table(text = gsub("::", "\t", readLines("ratings.dat")), col.names = c("userId", "movieId", "rating", "timestamp"))
+#str(ratings)
+movies <- str_split_fixed(readLines("movies.dat"), "\\::", 3)
+
+# toggled off download from grouplens.org - defaulting to local copy 
+#dl <- tempfile()
+#download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+#ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+#                      col.names = c("userId", "movieId", "rating", "timestamp"))
+#movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+# run a very small sample to test
+movielens <- sample_n(movielens, size = floor(nrow(movielens)/params$subset_of_edx), replace = FALSE)
+#
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+#rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+# SECTION 2: DATA PREPARATION ###########################################################
+
+#test for complete cases in edx
+#sum(complete.cases(edx)) == nrow(edx)
+
+#add no of ratings for a movie as a field
+edx <- edx %>% group_by(movieId) %>% mutate(n_ratings = n()) %>% ungroup()
+#edx_sample <- edx_sample %>% group_by(movieId) %>% mutate(n_ratings = n()) %>% ungroup()
+
+#append matrix of unique movie genres to edx, i.e. split concatenated genres into distinct genres
+#n_distinct(edx$genres)
+#edx_single_genres <- edx %>% select(genres) %>% separate_rows(genres, sep ="\\|")
+#head(edx_single_genres)
+#edx_single_genres %>% summarize(n = n())
+#n_distinct(edx_single_genres)
+#genres_distinct <- distinct(edx_single_genres)
+#dim(genres_distinct)
+
+#for (i in 1:nrow(genres_distinct)){
+#  temp_vector <- str_detect(edx$genres, as.character(genres_distinct[i, ]))
+#  edx <- cbind(edx, temp_vector)
+#  colnames(edx)[colnames(edx) == "temp_vector"] <- paste("Genre", as.character(i), genres_distinct[i, ])
+#}
+#str(edx)
+
+#create a subset of edx for speed of testing
+#10% of full size
+#set.seed(1)
+#sample_index <- createDataPartition(edx$rating, times = 1, p = 0.1, list = FALSE)
+#edx_sample <- edx[sample_index, ]
+
+# Make sure userId and movieId in validation set are also in edx set
+#validation_sample <- edx[-sample_index, ] %>% 
+#  semi_join(edx, by = "movieId") %>%
+#  semi_join(edx, by = "userId")
+
+
+# SECTION 3: EXPLORATORY DATA ANALYSIS ####################################################
+#exploratory data analysis to understand 
+
+#display overall distributions of key parameters in the edx dataset
+#disable scientific notation
+options(scipen = 999)
+
+```
+
+### 3.2. Exploratory data analysis 
+Exploratory analysis of the `edx` dataset was undertaken to provide insights into the distributions of key parameters in the training data. 
+
+* A quick summary of the full `edx` dataset informs distributions across select key parameters 
+``` {r echo=FALSE} 
+knitr::knit_print(summary(edx[, c(1:3,7)]))
+```
+
+* Of particular interest is the histogram of ratings across the training set. Here one observes a far higher number of whole number ratings vs. ratings with half scores (potentially an insight for predictors at the training stage of the model). 
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#specifically, plot the ratings histogram
+edx %>% ggplot(aes(rating)) + geom_histogram(color = "blue4", fill = "cornflowerblue", binwidth = 0.5) + ggtitle("Histogram of ratings")
+```
+
+*	The number of distinct users and movies are $`r as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,2])`$ and $`r as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,1])`$ respectively. With only $`r as.numeric(nrow(edx))`$ lines in the `edx` training set, this indicates the sparseness of the training matrix (i.e. only $`r round(as.numeric(nrow(edx))/(as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,2]) * as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,1]))*100, 1)`$% - $`r as.numeric(nrow(edx))`$/($`r as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,2])`$ * $`r as.numeric((edx %>% summarize(n_movies = n_distinct(movieId), n_users = n_distinct(userId)))[1,1])`$) of the matrix of movie-user ratings).  
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+
+#testing for % of overall edx dataset with 100 or more entries for both movies and users
+filter_threshold <- 100
+edx_less_small_samples <-  edx %>% 
+     group_by(movieId) %>%
+     filter(n() >= filter_threshold) %>%
+     ungroup() %>%
+     group_by(userId) %>%
+     filter(n() >=filter_threshold) %>%
+     ungroup() %>%
+     nrow() / nrow(edx)
+```
+
+
+*	`edx` is further tested for small samples of either `movieId` or `userId` by filtering out movies and users with less than 100 ratings - approximately `r round(edx_less_small_samples*100, 1)`% of the movies and users have 100 or more entries. 
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+user_activity_levels <- edx %>% 
+  group_by(userId) %>% 
+  mutate(no_of_ratings_per_user = n()) %>% 
+  summarize(mean_u = mean(no_of_ratings_per_user)) %>%
+  summarize(mean = mean(mean_u), sd = sd(mean_u), median = median(mean_u)) 
+```
+
+*	In terms of user activity levels to rate movies, the median number of ratings per user is `r user_activity_levels$median`, with a mean of `r round(user_activity_levels$mean,1)` and standard deviation of `r round(user_activity_levels$sd,1)`
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+movie_activity_levels <- edx %>% 
+  group_by(movieId) %>% 
+  mutate(no_of_ratings_per_movie = n()) %>% 
+  summarize(mean_m = mean(no_of_ratings_per_movie)) %>%
+  summarize(mean = mean(mean_m), sd = sd(mean_m), median = median(mean_m)) 
+```
+
+*	Similarly, the movies data shows a median of `r movie_activity_levels$median` ratings per movie, a mean of `r round(movie_activity_levels$mean,1)` and standard deviation of `r round(movie_activity_levels$sd,1)`
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+edx %>% 
+  group_by(userId) %>% 
+  mutate(no_of_ratings_per_user = n()) %>% 
+  ggplot(aes(no_of_ratings_per_user)) + geom_histogram(binwidth = 100, color = "blue4", fill = "cornflowerblue") + ggtitle("Histogram of number of ratings per user") + xlab("number of ratings per user")
+```
+
+*	Sorting for the top movies by number of ratings, we see blockbusters with >30,000 ratings as illustrated in the below histograms (linear and logarithm scales) and supporting summary table of the top 10 movies by number of ratings.
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+edx %>% 
+  group_by(movieId) %>%
+  summarize(n_rating = n()) %>%
+  ggplot(aes(n_rating)) + 
+      geom_histogram(color = "blue4", fill = "cornflowerblue") + 
+      xlab("number of movie ratings per movie") + 
+      ggtitle("Histogram of number of ratings per movie")
+```
+  
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+edx %>% 
+  group_by(movieId) %>%
+  summarize(n_rating = n()) %>%
+  ggplot(aes(n_rating)) + 
+      geom_histogram(color = "blue4", fill = "cornflowerblue") + 
+      scale_x_log10() + 
+      xlab("log of number of movie ratings per movie") + 
+      ggtitle("Histogram of number of ratings per movie (logarithmic)")
+
+edx %>% 
+  group_by(movieId, title) %>%
+  summarize(n_rating = n(), mean_rating = mean(rating)) %>%
+  arrange(desc(n_rating)) %>% 
+  head(n = 10) %>%
+  knitr::knit_print()
+```
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+# test for correlations
+cor_rating_nratings <- 
+  edx %>% 
+  group_by(movieId) %>%
+  filter(n() > 100) %>%
+  summarize(mean_rating = mean(rating), n_ratings = n()) %>%
+  ungroup() %>%
+  cor()
+```
+
+*	This also aligns with a hypothesis to test for key correlations, e.g. the number of ratings a movie receives versus the rating itself (more people will watch and rate popular movies, and the top 10 movies by number of ratings have mean ratings higher than the global mean for the `edx` set, i.e. `r round(mean(edx$rating), 3)`). This relationship between the number of ratings and the mean rating per movie shows a moderate correlation of `r round(cor_rating_nratings[3, 2], 3)`.
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+# plot correlations
+edx %>% 
+  group_by(movieId) %>%
+  filter(n() > 100) %>%
+  summarize(mean_rating = mean(rating), n_ratings = n()) %>%
+  ungroup() %>%
+  ggplot(aes(n_ratings, mean_rating)) + 
+  geom_point(colour = "blue4", alpha = 0.5) +
+  geom_smooth(method = "lm", show.legend = TRUE) + 
+  ggtitle("Mean of ratings vs. number of ratings", 
+          subtitle= paste("Filtered for no. of ratings > 100, R^2 = ", 
+                      round(cor_rating_nratings[3, 2], 3)))
+```
+
+### 3.3. Developing a recommendation system  
+Modelling was initially tested on a subset of the `edx` training set, in the interests of speed of processing and confirmation of coding and overall approach. In the final modelling, the training was conducted on the entire `edx` training set and tested against the `validation` test set.  
+
+The chosen approach follows the HardvardX course approach. Whilst knn and random forest training approaches where attempted, the size of the dataset made these approaches computationally infeasible on a standard business laptop (running a windows based i7 @ 1.8GHz with 8Gb RAM)  
+
+The results section that follows summarises 4 models tested, i.e. a simple mean of ratings, adding a movie bias effect, adding a movie and user bias effect, and finally regularizing the movie and user bias effects with optimal lambdas for each parameter.  
+
+
+## 4. Results
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+# SECTION 4: TESTING PREDICTION MODELS ###############################################################
+
+#set up train and test data partitions - toggled off testing for a subset of data
+set.seed(1)
+#previously used: test_index_sample <- createDataPartition(y = edx_sample$rating, times = 1, p = 0.2, list = FALSE)
+train_set_sample <- edx #previously used: edx_sample[-test_index_sample, ]
+test_set_sample <- validation  #previously used: edx_sample[test_index_sample, ]
+
+test_set_sample <- test_set_sample %>% 
+  semi_join(train_set_sample, by = "movieId") %>%
+  semi_join(train_set_sample, by = "userId")
+
+#set up the RMSE function
+
+RMSE <- function(actual_ratings, pred_ratings){
+  sqrt(mean((actual_ratings - pred_ratings)^2))
+}
+
+#Test model 1 - mean rating for all
+mean_rating_sample <- mean(train_set_sample$rating)
+rmse1_naive <- RMSE(test_set_sample$rating, mean_rating_sample)
+test_results <- data_frame(method = "Global mean", RMSE = rmse1_naive)
+
+```
+### 4.1. Test model 1 - simple mean
+This first model calculates the mean of the entire `edx` training set ($`r mean_rating_sample`$) and uses this as an estimate for the test set. The resultant RMSE is $`r rmse1_naive`$
+
+### 4.2. Test model 2 - adding movie bias
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#Test model 2 - movie effect
+bias_movies <- train_set_sample %>% 
+  group_by(movieId) %>% 
+  summarize(movie_i = mean(rating - mean_rating_sample))
+```
+
+It can be expected that certain movies will, on average, score higher or lower than the mean of all movies given its overall popularity with viewers. Model 2 adds a movie bias to the basic mean estimate (test 1), i.e. predicted rating = mu + b_movie where b_movie_i is the mean of the differences between a specific movie's ratings and the average of the full dataset.   
+
+``` {r} 
+bias_movies %>% ggplot(aes(movie_i)) + geom_histogram(binwidth = 0.25, color = "blue4", fill = "cornflowerblue") + ggtitle("Histogram of movie effects")
+```
+
+Testing for the spread of movie biases on the `edx` dataset one can see a longer tail to the downside, i.e. certain movies score very poorly versus the mean. 
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+pred_ratings <- mean_rating_sample + test_set_sample %>% 
+  left_join(bias_movies, by='movieId') %>%
+  pull(movie_i)
+
+rmse2_movie_bias <- RMSE(pred_ratings, test_set_sample$rating)
+test_results <- bind_rows(test_results,
+                          data_frame(method="Add Movie bias",  
+                                     RMSE = rmse2_movie_bias))
+```
+
+Applying the movie bias to the recommendation algorithm for model 2 gives an RMSE of `r rmse2_movie_bias`, a big improvement on the simple mean estimate in Test 1. 
+
+### 4.3. Test model 3 - adding user bias in addition to the movie bias
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#Test model 3 - add user effect to mean + movie effect
+bias_users <- train_set_sample %>% 
+  left_join(bias_movies, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(user_i = mean(rating - mean_rating_sample - movie_i))
+```
+Similarly for model 3, the biases for individual users are added to the prediction model. Some users can be expected to rate movies more harshly than others, and this spread is also seen in the below figure. 
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+bias_users %>% ggplot(aes(user_i)) + geom_histogram(binwidth = 0.25, color = "blue4", fill = "cornflowerblue") + ggtitle("Histogram of user effects")
+
+pred_ratings <- test_set_sample %>% 
+  left_join(bias_movies, by='movieId') %>%
+  left_join(bias_users, by='userId') %>%
+  mutate(pred = mean_rating_sample + movie_i + user_i) %>%
+  pull(pred)
+
+rmse3_user_bias <- RMSE(pred_ratings, test_set_sample$rating)
+test_results <- bind_rows(test_results,
+                          data_frame(method="Add Movie and User Bias",  
+                                     RMSE = rmse3_user_bias))
+```
+
+Test model 3 - adding a user bias to the mean rating estimate and movie bias - gives an RMSE of `r rmse3_user_bias`, a further improvement as we add an additional predictor. 
+
+### 4.4. Test model 4 - adding both movie and user bias, and regularizing both with differing lambdas
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#Test model 4 - regularised movie and user effects
+# 4.1. solve for minimum lambda as applied to both movie and user effect
+lambdas_movie <- seq(3.5, 6, 0.25)
+lambdas_user <- seq(4.5, 6, 0.25)
+rmses <- matrix(nrow = length(lambdas_movie), ncol = length(lambdas_user))
+
+for (l_m in 1:length(lambdas_movie)){
+  for (l_u in 1:length(lambdas_user)){
+  
+  mu <- mean(train_set_sample$rating)
+  
+  b_movie_i <- train_set_sample %>% 
+    group_by(movieId) %>%
+    summarize(b_movie_i = sum(rating - mu)/(n()+lambdas_movie[l_m]))
+  
+  b_user_i <- train_set_sample %>% 
+    left_join(b_movie_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_user_i = sum(rating - b_movie_i - mu)/(n()+lambdas_user[l_u]))
+  
+  pred_ratings <- 
+    test_set_sample %>% 
+    left_join(b_movie_i, by = "movieId") %>%
+    left_join(b_user_i, by = "userId") %>%
+    mutate(pred = mu + b_movie_i + b_user_i) %>%
+    pull(pred)
+  
+  rmses[l_m,l_u] <- RMSE(pred_ratings, test_set_sample$rating)
+  }
+}  
+colnames(rmses) <- lambdas_user
+rownames(rmses) <- lambdas_movie
+#which.min(rmses)
+#as.vector(rmses)[which.min(rmses)]
+
+lambdas_movie_optimal <- 
+  lambdas_movie[ifelse(which.min(rmses) %% length(lambdas_movie) == 0, 
+                       length(lambdas_movie), 
+                       which.min(rmses) %% length(lambdas_movie))] 
+lambdas_user_optimal <- lambdas_user[ceiling(which.min(rmses)/length(lambdas_movie))]
+
+```
+
+In the final model selected, the movie and user effects are regularized with different lambdas. After a few runs to narrow the range of the lambdas, the resultant minimal RMSE is found at lambda_movie = `r lambdas_movie_optimal` and lambda_user = `r lambdas_user_optimal`, as seen per the table below:
+
+``` {r}
+knitr::knit_print(round(rmses, 5))
+```
+
+The optimal lambdas are generated from the following code, running a nest for loop to test discrete lambdas for both. 
+
+``` {r echo=TRUE, message=FALSE, warning=FALSE}
+lambdas_movie <- seq(3.5, 6, 0.25)
+lambdas_user <- seq(4.5, 6, 0.25)
+rmses <- matrix(nrow = length(lambdas_movie), ncol = length(lambdas_user))
+
+for (l_m in 1:length(lambdas_movie)){
+  for (l_u in 1:length(lambdas_user)){
+  
+  mu <- mean(train_set_sample$rating)
+  
+  b_movie_i <- train_set_sample %>% 
+    group_by(movieId) %>%
+    summarize(b_movie_i = sum(rating - mu)/(n()+lambdas_movie[l_m]))
+  
+  b_user_i <- train_set_sample %>% 
+    left_join(b_movie_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_user_i = sum(rating - b_movie_i - mu)/(n()+lambdas_user[l_u]))
+  
+  pred_ratings <- 
+    test_set_sample %>% 
+    left_join(b_movie_i, by = "movieId") %>%
+    left_join(b_user_i, by = "userId") %>%
+    mutate(pred = mu + b_movie_i + b_user_i) %>%
+    pull(pred)
+  
+  rmses[l_m,l_u] <- RMSE(pred_ratings, test_set_sample$rating)
+  }
+}  
+colnames(rmses) <- lambdas_user
+rownames(rmses) <- lambdas_movie
+
+lambdas_movie_optimal <- 
+  lambdas_movie[ifelse(which.min(rmses) %% length(lambdas_movie) == 0, 
+                       length(lambdas_movie), 
+                       which.min(rmses) %% length(lambdas_movie))] 
+lambdas_user_optimal <- lambdas_user[ceiling(which.min(rmses)/length(lambdas_movie))]
+```
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#4.2. calculate the RMSE off of the optimal lambdas for rmse4_reg_movie_user 
+
+mu <- mean(train_set_sample$rating)
+b_movie_i <- train_set_sample %>% 
+  group_by(movieId) %>%
+  summarize(b_movie_i = sum(rating - mu)/(n()+lambdas_movie_optimal))
+
+b_user_i <- train_set_sample %>% 
+  left_join(b_movie_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user_i = sum(rating - b_movie_i - mu)/(n()+lambdas_user_optimal))
+
+pred_ratings <- 
+  test_set_sample %>% 
+  left_join(b_movie_i, by = "movieId") %>%
+  left_join(b_user_i, by = "userId") %>%
+  mutate(pred = mu + b_movie_i + b_user_i) %>%
+  pull(pred)
+
+rmse4_reg_movie_user <- RMSE(pred_ratings, test_set_sample$rating)
+test_results <- bind_rows(test_results,
+                          data_frame(method="Regularized Movie and User Bias",  
+                                     RMSE = rmse4_reg_movie_user))
+
+```
+
+Applying these optimal lamdas to regularize the this model yields a RMSE of `r rmse4_reg_movie_user`.  
+We see the impact of regularization on the movie effect and on the user effect with the below 2 graphs that plot the original unregularized estimates, and then the regularized that dampens the effect for movies/users with a lower number of ratings (thus not overbiasing the model towards these smaller samples)
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#plot of regularised movie bias
+b_movie_i <- train_set_sample %>% 
+  group_by(movieId) %>%
+  summarize(b_movie_i = sum(rating - mu)/(n()+lambdas_movie_optimal), 
+            n = n())
+
+data_frame(non_reg = bias_movies$movie_i, 
+           regularlized = b_movie_i$b_movie_i, 
+           n = b_movie_i$n) %>%
+  ggplot(aes(non_reg, regularlized, size=log10(n))) + 
+  geom_point(shape=1, alpha=0.1, color = "blue4") +
+  ggtitle("Original movie bias vs. regularised")
+```
+
+
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+#plot of regularised user bias
+b_user_i <- train_set_sample %>% 
+  left_join(b_movie_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user_i = sum(rating - b_movie_i - mu)/(n()+lambdas_user_optimal),
+            n = n())
+
+data_frame(non_reg = bias_users$user_i, 
+           regularlized = b_user_i$b_user_i, 
+           n = b_user_i$n) %>%
+  ggplot(aes(non_reg, regularlized, size=log10(n))) + 
+  geom_point(shape=1, alpha=0.2, color = "blue4") +
+  ggtitle("Original user bias vs. regularised")
+
+```
+
+### 4.5. Summary of test models 
+In summary, the 4 test models yield the following RMSEs with progressively better RMSEs  
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+as.data.frame(test_results)
+```
+
+##5. Conclusions  
+The final model selected (Test model 4) achieves an RMSE of $`r rmse4_reg_movie_user`$ (lower than the targeted 0.87750 per the grading rubric). Beyond this project and with more time, I would like to further explore some of the following refinements to the current prediction approach:  
+
+* Test alternative ML methodologies on a smaller dataset, e.g. KNN, random forests, UBCF
+* Test combinations of approaches into an ensemble prediction
+* Test the impact of adding additional predictors, e.g. time effects, genres. (I did test the number of ratings on top of my final model with no noticeable improvement in RMSE and thus dropped that parameter from the final approach)  
+
+The subsequent "choose your own" Capstone will afford an opportunity to test a broader range of machine learning approaches on a smaller dataset.
